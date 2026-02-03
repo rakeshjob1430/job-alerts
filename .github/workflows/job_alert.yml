@@ -2,13 +2,12 @@ name: Job Alerts
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "0 11 * * *"   # 5:00 AM CST (UTC-6) = 11:00 UTC
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -21,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run job alert script
+      - name: Run daily job report
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
