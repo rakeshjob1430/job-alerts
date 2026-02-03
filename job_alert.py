@@ -68,15 +68,31 @@ def serpapi_google_jobs(query: str, location: str) -> List[Dict[str, Any]]:
 
 
 def serpapi_google_jobs_listing(job_id: str) -> Dict[str, Any]:
-    """Fetch detailed job listing info (often includes better apply links, posted time, salary)."""
+    """
+    Fetch detailed job listing info.
+    IMPORTANT: SerpAPI sometimes returns 400 for some job_id values.
+    We must NOT fail the whole workflow. Return {} if any error happens.
+    """
+    if not job_id:
+        return {}
+
     params = {
         "engine": "google_jobs_listing",
         "job_id": job_id,
         "api_key": SERPAPI_KEY,
     }
-    r = requests.get("https://serpapi.com/search", params=params, timeout=30)
-    r.raise_for_status()
-    return r.json() or {}
+
+    try:
+        r = requests.get("https://serpapi.com/search", params=params, timeout=30)
+
+        # If SerpAPI returns non-200 (400/403/429/etc), just skip details
+        if r.status_code != 200:
+            return {}
+
+        return r.json() or {}
+
+    except requests.RequestException:
+        return {}
 
 
 def safe_apply_link_from_job(job: Dict[str, Any]) -> str:
@@ -93,19 +109,21 @@ def safe_apply_link_from_details(details: Dict[str, Any]) -> str:
     return "N/A"
 
 
+def safe_pay_from_extensions(ext_list: Any) -> str:
+    if isinstance(ext_list, list):
+        for item in ext_list:
+            if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower() or "per" in item.lower()):
+                return item
+    return "N/A"
+
+
 def safe_pay(job: Dict[str, Any]) -> str:
     de = job.get("detected_extensions") or {}
     if isinstance(de, dict):
         sal = de.get("salary")
         if sal:
             return str(sal)
-
-    ext = job.get("extensions") or []
-    if isinstance(ext, list):
-        for item in ext:
-            if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower() or "per" in item.lower()):
-                return item
-    return "N/A"
+    return safe_pay_from_extensions(job.get("extensions") or [])
 
 
 def safe_pay_from_details(details: Dict[str, Any]) -> str:
@@ -114,13 +132,7 @@ def safe_pay_from_details(details: Dict[str, Any]) -> str:
         sal = de.get("salary")
         if sal:
             return str(sal)
-
-    ext = details.get("extensions") or []
-    if isinstance(ext, list):
-        for item in ext:
-            if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower() or "per" in item.lower()):
-                return item
-    return "N/A"
+    return safe_pay_from_extensions(details.get("extensions") or [])
 
 
 def safe_time_posted(job: Dict[str, Any]) -> str:
@@ -165,22 +177,22 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
     time_posted = safe_time_posted(job)
     apply_link = safe_apply_link_from_job(job)
 
-    # If important fields are missing, fetch details to reduce N/A
+    # Only try details if missing fields
     if job_id and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A"):
         details = serpapi_google_jobs_listing(job_id)
 
-        if pay == "N/A":
-            pay = safe_pay_from_details(details)
+        if details:
+            if pay == "N/A":
+                pay = safe_pay_from_details(details)
 
-        if time_posted == "N/A":
-            time_posted = safe_time_posted_from_details(details)
+            if time_posted == "N/A":
+                time_posted = safe_time_posted_from_details(details)
 
-        if apply_link == "N/A":
-            apply_link = safe_apply_link_from_details(details)
+            if apply_link == "N/A":
+                apply_link = safe_apply_link_from_details(details)
 
-        # sometimes source appears here too
-        if source == "Unknown":
-            source = details.get("via") or source
+            if source == "Unknown":
+                source = details.get("via") or source
 
     return {
         "title": title,
@@ -273,6 +285,9 @@ Total jobs found: {len(all_rows)}
 
 Columns:
 title, company name, pay, time posted, location, source, link to apply
+
+Note:
+Some jobs may still show N/A for pay/time/link if the posting does not publish that info.
 
 Regards,
 Job Bot
