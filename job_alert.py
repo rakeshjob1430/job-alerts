@@ -12,38 +12,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 LOCATION = "United States"
-
-ROLE_KEYWORDS = [
-    "Quality Assurance Supervisor",
-    "Quality Assurance Manager",
-    "QA Supervisor",
-    "QA Manager",
-    "Quality Supervisor",
-    "Quality Manager",
-    "FSQ Manager",
-    "FSQ Supervisor",
-    "FSQ Specialist",
-    "FSQA Manager",
-    "FSQA Supervisor",
-    "FSQA Specialist",
-    "Food Safety Manager",
-    "Food Safety Supervisor",
-    "Quality Specialist",
-    "Quality Lead",
-]
-
-FOOD_HINTS = [
-    "food", "food manufacturing", "food processing", "meat", "dairy",
-    "bakery", "beverage", "plant", "production", "HACCP", "SQF",
-    "FSQA", "GMP", "sanitation"
-]
-
 
 def validate_env():
     if not SERPAPI_KEY:
@@ -52,57 +25,36 @@ def validate_env():
         raise ValueError("Email secrets missing")
 
 
-# ---------------- SerpAPI calls with pagination + retries ----------------
-def serpapi_google_jobs(query: str, location: str, num: int = 100, pages: int = 3) -> List[Dict[str, Any]]:
-    """
-    Fetches multiple pages so we get more results (Indeed often appears later pages).
-    pages=3 with num=100 can collect up to ~300 items (depends on availability).
-    """
-    results: List[Dict[str, Any]] = []
-    start = 0
+def serpapi_google_jobs(query: str, location: str, num: int = 100) -> List[Dict[str, Any]]:
+    params = {
+        "engine": "google_jobs",
+        "q": query,
+        "location": location,
+        "api_key": SERPAPI_KEY,
+        "num": num,
+    }
 
     retry_statuses = {429, 502, 503, 504}
-    max_attempts = 5
-
-    for _ in range(pages):
-        params = {
-            "engine": "google_jobs",
-            "q": query,
-            "location": location,
-            "api_key": SERPAPI_KEY,
-            "num": num,
-            "start": start,
-        }
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                r = requests.get("https://serpapi.com/search", params=params, timeout=30)
-
-                if r.status_code in retry_statuses:
-                    time.sleep(2 ** attempt)
-                    continue
-
-                r.raise_for_status()
-                data = r.json()
-                page_jobs = data.get("jobs_results", []) or []
-                results.extend(page_jobs)
-                break
-            except requests.RequestException:
+    for attempt in range(1, 5):
+        try:
+            r = requests.get("https://serpapi.com/search", params=params, timeout=30)
+            if r.status_code in retry_statuses:
                 time.sleep(2 ** attempt)
+                continue
+            r.raise_for_status()
+            return r.json().get("jobs_results", []) or []
+        except requests.RequestException:
+            time.sleep(2 ** attempt)
 
-        start += num
-
-    return results
+    return []
 
 
-# ---------------- Helpers ----------------
 def safe_pay(job: Dict[str, Any]) -> str:
     de = job.get("detected_extensions") or {}
     if isinstance(de, dict) and de.get("salary"):
         return str(de["salary"])
-
     for item in job.get("extensions", []) or []:
-        if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower()):
+        if isinstance(item, str) and "$" in item:
             return item
     return "N/A"
 
@@ -111,7 +63,6 @@ def safe_time_posted(job: Dict[str, Any]) -> str:
     de = job.get("detected_extensions") or {}
     if isinstance(de, dict) and de.get("posted_at"):
         return str(de["posted_at"])
-
     for item in job.get("extensions", []) or []:
         if isinstance(item, str) and ("ago" in item.lower() or "today" in item.lower() or "yesterday" in item.lower()):
             return item
@@ -138,15 +89,6 @@ def posted_days(time_posted: str) -> int:
     return 999
 
 
-def looks_food_industry(job: Dict[str, Any]) -> bool:
-    text = " ".join([
-        str(job.get("title", "")),
-        str(job.get("company_name", "")),
-        str(job.get("description", "")),
-    ]).lower()
-    return any(h in text for h in FOOD_HINTS)
-
-
 def company_careers_link(company: str) -> str:
     if not company:
         return "N/A"
@@ -154,43 +96,25 @@ def company_careers_link(company: str) -> str:
     return "https://www.google.com/search?q=" + urllib.parse.quote_plus(q)
 
 
-def indeed_search_link(title: str, location: str) -> str:
-    """
-    Always-works Indeed search link (no N/A).
-    """
-    q = f"{title} {location}"
+def indeed_search_link(title: str) -> str:
+    q = f"{title} {LOCATION}"
     return "https://www.indeed.com/jobs?q=" + urllib.parse.quote_plus(q)
 
 
 def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
     title = job.get("title", "N/A")
     company = job.get("company_name", "N/A")
-    location = job.get("location", "N/A")
-    source = job.get("via", "Unknown")
-
     return {
         "job_id": job.get("job_id", "N/A"),
         "title": title,
         "company_name": company,
         "pay": safe_pay(job),
         "time_posted": safe_time_posted(job),
-        "location": location,
-        "source": source,
+        "location": job.get("location", "N/A"),
+        "source": job.get("via", "Unknown"),
         "company_careers_link": company_careers_link(company),
-        "indeed_search_link": indeed_search_link(title, LOCATION),
+        "indeed_search_link": indeed_search_link(title),
     }
-
-
-def build_queries() -> List[str]:
-    queries = []
-    for role in ROLE_KEYWORDS:
-        queries.append(f'"{role}" food')
-        queries.append(f'"{role}" food manufacturing')
-        queries.append(f'"{role}" food processing')
-        queries.append(f'"{role}" HACCP')
-        queries.append(f'"{role}" SQF')
-        queries.append(f'"{role}" FSQA')
-    return queries
 
 
 def dedupe(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -211,14 +135,8 @@ def create_excel(rows: List[Dict[str, str]], filename: str):
     ws.title = "Jobs"
 
     headers = [
-        "title",
-        "company_name",
-        "pay",
-        "time_posted",
-        "location",
-        "source",
-        "company_careers_link",
-        "indeed_search_link",
+        "title", "company_name", "pay", "time_posted",
+        "location", "source", "company_careers_link", "indeed_search_link"
     ]
     ws.append(headers)
 
@@ -240,15 +158,14 @@ def create_excel(rows: List[Dict[str, str]], filename: str):
 
 def send_email(excel_file: str, count: int):
     today = datetime.now().strftime("%Y-%m-%d")
-
     msg = EmailMessage()
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_RECEIVER
     msg["Subject"] = f"Daily Food Quality Jobs Report - {today}"
     msg.set_content(
-        f"Attached is your daily Food Quality/FSQA report (last 7 days).\n"
+        f"Attached is your daily Food Quality/FSQA jobs report (last 7 days).\n"
         f"Total jobs: {count}\n\n"
-        f"Tip: If source is not Indeed, use the Indeed search link column."
+        f"Use the company careers link and Indeed search link to apply quickly."
     )
 
     with open(excel_file, "rb") as f:
@@ -267,25 +184,28 @@ def send_email(excel_file: str, count: int):
 def main():
     validate_env()
 
-    rows: List[Dict[str, str]] = []
-    for q in build_queries():
-        # Fetch more results/pages so we get Indeed results too
-        jobs = serpapi_google_jobs(q, LOCATION, num=100, pages=3)
-        for job in jobs:
-            if looks_food_industry(job):
-                rows.append(normalize_row(job))
+    # ONE strong query (fast!)
+    big_query = (
+        '("Quality Assurance Supervisor" OR "QA Supervisor" OR "Quality Supervisor" OR '
+        '"Quality Assurance Manager" OR "QA Manager" OR "Quality Manager" OR '
+        '"FSQA Supervisor" OR "FSQA Manager" OR "FSQ Supervisor" OR "FSQ Manager" OR '
+        '"Food Safety Supervisor" OR "Food Safety Manager" OR "Quality Specialist") '
+        'food manufacturing OR food processing OR HACCP OR SQF OR FSQA'
+    )
+
+    jobs = serpapi_google_jobs(big_query, LOCATION, num=100)
+    rows = [normalize_row(j) for j in jobs]
 
     rows = dedupe(rows)
 
-    # last 7 days only
+    # last 7 days
     rows = [r for r in rows if posted_days(r.get("time_posted", "N/A")) <= 7]
 
-    # sort newest first
+    # newest first
     rows.sort(key=lambda r: posted_days(r.get("time_posted", "N/A")))
 
     today = datetime.now().strftime("%Y-%m-%d")
     excel_file = f"food_quality_jobs_{today}.xlsx"
-
     create_excel(rows, excel_file)
     send_email(excel_file, len(rows))
 
