@@ -16,6 +16,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 
+
 SEARCH_QUERY = "Food Safety Supervisor"
 LOCATION = "United States"
 
@@ -109,5 +110,6 @@ def check_jobs():
 
 if __name__ == "__main__":
     check_jobs()
+
 
 
