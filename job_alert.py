@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import urllib.parse
 import requests
 import smtplib
 import ssl
@@ -8,6 +9,7 @@ from email.message import EmailMessage
 from datetime import datetime
 from typing import List, Dict, Any
 from openpyxl import Workbook
+from openpyxl.styles import Font
 
 # ============== ENV (GitHub Secrets) ==============
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
@@ -19,7 +21,6 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 LOCATION = "United States"
 
-# Roles you requested (quality + food safety)
 ROLE_KEYWORDS = [
     "Quality Assurance Supervisor",
     "Quality Assurance Manager",
@@ -39,7 +40,6 @@ ROLE_KEYWORDS = [
     "Quality Lead",
 ]
 
-# Soft hints to keep it food industry focused
 FOOD_HINTS = [
     "food", "food manufacturing", "food processing", "meat", "dairy", "bakery", "beverage",
     "plant", "production", "warehouse", "HACCP", "SQF", "FSQA", "GMP", "sanitation"
@@ -55,10 +55,6 @@ def validate_env():
 
 # ---------------- SerpAPI calls with retry/backoff ----------------
 def serpapi_google_jobs(query: str, location: str, num: int = 50) -> List[Dict[str, Any]]:
-    """
-    Fetch jobs from SerpAPI Google Jobs.
-    Retry on temporary errors: 429, 502, 503, 504
-    """
     params = {
         "engine": "google_jobs",
         "q": query,
@@ -85,16 +81,10 @@ def serpapi_google_jobs(query: str, location: str, num: int = 50) -> List[Dict[s
         except requests.RequestException:
             time.sleep(2 ** attempt)
 
-    # If all retries fail, return empty list (workflow still emails report)
     return []
 
 
 def serpapi_google_jobs_listing(job_id: str) -> Dict[str, Any]:
-    """
-    Fetch job details from SerpAPI Google Jobs Listing.
-    Some job_ids can return 400; treat that as "no details available".
-    Retry on temporary errors.
-    """
     if not job_id:
         return {}
 
@@ -129,9 +119,32 @@ def safe_apply_link(job: Dict[str, Any]) -> str:
     return "N/A"
 
 
+def safe_source_link(job: Dict[str, Any]) -> str:
+    """
+    Best-effort "source link". Usually same as related_links[0]['link'].
+    If SerpAPI provides more links, we can pick a second one as source.
+    """
+    links = job.get("related_links") or []
+    if isinstance(links, list) and len(links) >= 2:
+        return links[1].get("link") or "N/A"
+    if isinstance(links, list) and len(links) == 1:
+        # fallback to the only link we have
+        return links[0].get("link") or "N/A"
+    return "N/A"
+
+
 def safe_apply_link_from_details(details: Dict[str, Any]) -> str:
     apply_options = details.get("apply_options") or []
     if isinstance(apply_options, list) and apply_options:
+        return apply_options[0].get("link") or "N/A"
+    return "N/A"
+
+
+def safe_source_link_from_details(details: Dict[str, Any]) -> str:
+    apply_options = details.get("apply_options") or []
+    if isinstance(apply_options, list) and len(apply_options) >= 2:
+        return apply_options[1].get("link") or "N/A"
+    if isinstance(apply_options, list) and len(apply_options) == 1:
         return apply_options[0].get("link") or "N/A"
     return "N/A"
 
@@ -180,10 +193,6 @@ def safe_time_posted_from_details(details: Dict[str, Any]) -> str:
 
 
 def posted_days(time_posted: str) -> int:
-    """
-    Convert strings like:
-    'today', 'yesterday', '3 days ago', '1 week ago', '5 hours ago' -> days integer.
-    """
     if not time_posted or time_posted == "N/A":
         return 999
 
@@ -217,6 +226,17 @@ def looks_food_industry(job: Dict[str, Any]) -> bool:
     return any(h.lower() in text for h in FOOD_HINTS)
 
 
+def company_careers_search_link(company_name: str) -> str:
+    """
+    Reliable "company careers link" as a Google search shortcut.
+    Works even when we don't have an official careers URL.
+    """
+    if not company_name or company_name == "N/A":
+        return "N/A"
+    q = f"{company_name} careers"
+    return "https://www.google.com/search?q=" + urllib.parse.quote_plus(q)
+
+
 def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
     job_id = job.get("job_id") or "N/A"
 
@@ -228,9 +248,10 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
     pay = safe_pay(job)
     time_posted = safe_time_posted(job)
     apply_link = safe_apply_link(job)
+    source_link = safe_source_link(job)
 
     # Try details if any key field is missing (best effort)
-    if job_id != "N/A" and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A"):
+    if job_id != "N/A" and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A" or source_link == "N/A"):
         details = serpapi_google_jobs_listing(job_id)
         if details:
             if pay == "N/A":
@@ -239,11 +260,15 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
                 time_posted = safe_time_posted_from_details(details) or time_posted
             if apply_link == "N/A":
                 apply_link = safe_apply_link_from_details(details) or apply_link
+            if source_link == "N/A":
+                source_link = safe_source_link_from_details(details) or source_link
             if source == "Unknown":
                 source = details.get("via") or source
 
+    careers_link = company_careers_search_link(company)
+
     return {
-        "job_id": job_id,  # used for dedupe only (not included in Excel)
+        "job_id": job_id,  # for dedupe only
         "title": title,
         "company_name": company,
         "pay": pay if pay else "N/A",
@@ -251,13 +276,12 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
         "location": location,
         "source": source,
         "apply_link": apply_link if apply_link else "N/A",
+        "source_link": source_link if source_link else "N/A",
+        "company_careers_link": careers_link,
     }
 
 
 def build_queries() -> List[str]:
-    """
-    Broader queries => more jobs. We then filter for food industry.
-    """
     queries = []
     for role in ROLE_KEYWORDS:
         queries.append(f'"{role}" food')
@@ -270,9 +294,6 @@ def build_queries() -> List[str]:
 
 
 def dedupe_by_job_id(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """
-    Correct dedupe: use job_id so we never collapse down to 1 row.
-    """
     seen = set()
     out = []
     for row in rows:
@@ -289,11 +310,37 @@ def create_excel(rows: List[Dict[str, str]], filename: str) -> str:
     ws = wb.active
     ws.title = "Jobs"
 
-    headers = ["title", "company_name", "pay", "time_posted", "location", "source", "apply_link"]
+    headers = [
+        "title",
+        "company_name",
+        "pay",
+        "time_posted",
+        "location",
+        "source",
+        "apply_link",
+        "source_link",
+        "company_careers_link",
+    ]
     ws.append(headers)
 
+    # Add rows
     for r in rows:
         ws.append([r.get(h, "N/A") for h in headers])
+
+    # Make links clickable in Excel (apply_link, source_link, company_careers_link)
+    link_cols = {
+        "apply_link": headers.index("apply_link") + 1,
+        "source_link": headers.index("source_link") + 1,
+        "company_careers_link": headers.index("company_careers_link") + 1,
+    }
+
+    for row_idx in range(2, ws.max_row + 1):
+        for col_name, col_idx in link_cols.items():
+            cell = ws.cell(row=row_idx, column=col_idx)
+            val = str(cell.value or "")
+            if val.startswith("http"):
+                cell.hyperlink = val
+                cell.font = Font(color="0000FF", underline="single")
 
     wb.save(filename)
     return filename
@@ -327,18 +374,15 @@ def main():
 
     all_rows: List[Dict[str, str]] = []
 
-    # Pull jobs from many queries
     for q in build_queries():
         jobs = serpapi_google_jobs(q, LOCATION, num=50)
         for job in jobs:
-            # soft filter for food industry relevance
             if looks_food_industry(job):
                 all_rows.append(normalize_row(job))
 
-    # dedupe correctly
     all_rows = dedupe_by_job_id(all_rows)
 
-    # keep only jobs posted in last 7 days
+    # keep last 7 days
     all_rows = [r for r in all_rows if posted_days(r.get("time_posted", "N/A")) <= 7]
 
     # sort newest first
@@ -354,14 +398,12 @@ def main():
 Attached is your daily Food Industry Quality/FSQA job report (last 7 days).
 Total jobs found: {len(all_rows)}
 
-Columns:
-title, company name, pay, time posted, location, source, link to apply
+Excel includes clickable links:
+- apply_link (direct apply when available)
+- source_link (source posting link when available)
+- company_careers_link (Google search to company careers page)
 
-Note:
-Pay/time/link may show N/A when the employer posting does not provide it.
-
-Source column will show things like:
-via Indeed / via LinkedIn / via Glassdoor / via ZipRecruiter (when available)
+Note: Sometimes apply/source links show N/A when the posting doesn't provide them.
 
 Regards,
 Job Bot
