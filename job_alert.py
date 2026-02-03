@@ -7,11 +7,14 @@ from email.message import EmailMessage
 from datetime import datetime
 
 # ================= CONFIG =================
+import os
+
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")   # Gmail App Password
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+
 
 SEARCH_QUERY = "Food Safety Supervisor"
 LOCATION = "United States"
@@ -73,10 +76,10 @@ Checked at: {datetime.now()}
 def check_jobs():
     # quick validation so you know immediately if secrets are missing
     if not SERPAPI_KEY:
-    raise ValueError("SERPAPI_KEY missing")
+        raise ValueError("SERPAPI_KEY missing")
 
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
-    raise ValueError("Email secrets missing")
+        raise ValueError("Email secrets missing")
 
 
     seen_jobs = load_seen_jobs()
@@ -106,4 +109,5 @@ def check_jobs():
 
 if __name__ == "__main__":
     check_jobs()
+
 
