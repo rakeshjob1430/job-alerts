@@ -8,11 +8,11 @@ from datetime import datetime
 # ================= CONFIG =================
 import os
 
-SERPAPI_KEY = os.getenv("978e05adbef88e8b658bef3f59c4fdb6a06f6f0c27ad6551c5a73e87e5a8b0d6")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
-EMAIL_SENDER = os.getenv("rakeshchigurupati1623@gmail.com")
-EMAIL_PASSWORD = os.getenv("wozu kzpb ohyd hbcq")
-EMAIL_RECEIVER = os.getenv("rakeshchigurupati1623@gmail.com")
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 SEARCH_QUERY = "Food Safety Supervisor"
 LOCATION = "United States"
@@ -80,4 +80,5 @@ def check_jobs():
 
 if __name__ == "__main__":
     check_jobs()
+
 
