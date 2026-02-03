@@ -11,13 +11,11 @@ from typing import List, Dict, Any
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-# ============== ENV (GitHub Secrets) ==============
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # Gmail App Password
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-# ================================================
 
 LOCATION = "United States"
 
@@ -41,131 +39,71 @@ ROLE_KEYWORDS = [
 ]
 
 FOOD_HINTS = [
-    "food", "food manufacturing", "food processing", "meat", "dairy", "bakery", "beverage",
-    "plant", "production", "warehouse", "HACCP", "SQF", "FSQA", "GMP", "sanitation"
+    "food", "food manufacturing", "food processing", "meat", "dairy",
+    "bakery", "beverage", "plant", "production", "HACCP", "SQF",
+    "FSQA", "GMP", "sanitation"
 ]
 
 
 def validate_env():
     if not SERPAPI_KEY:
-        raise ValueError("SERPAPI_KEY missing (GitHub Secret).")
+        raise ValueError("SERPAPI_KEY missing")
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
-        raise ValueError("EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECEIVER missing (GitHub Secrets).")
+        raise ValueError("Email secrets missing")
 
 
-# ---------------- SerpAPI calls with retry/backoff ----------------
-def serpapi_google_jobs(query: str, location: str, num: int = 50) -> List[Dict[str, Any]]:
-    params = {
-        "engine": "google_jobs",
-        "q": query,
-        "location": location,
-        "api_key": SERPAPI_KEY,
-        "num": num,
-    }
+# ---------------- SerpAPI calls with pagination + retries ----------------
+def serpapi_google_jobs(query: str, location: str, num: int = 100, pages: int = 3) -> List[Dict[str, Any]]:
+    """
+    Fetches multiple pages so we get more results (Indeed often appears later pages).
+    pages=3 with num=100 can collect up to ~300 items (depends on availability).
+    """
+    results: List[Dict[str, Any]] = []
+    start = 0
 
     retry_statuses = {429, 502, 503, 504}
     max_attempts = 5
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            r = requests.get("https://serpapi.com/search", params=params, timeout=30)
+    for _ in range(pages):
+        params = {
+            "engine": "google_jobs",
+            "q": query,
+            "location": location,
+            "api_key": SERPAPI_KEY,
+            "num": num,
+            "start": start,
+        }
 
-            if r.status_code in retry_statuses:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = requests.get("https://serpapi.com/search", params=params, timeout=30)
+
+                if r.status_code in retry_statuses:
+                    time.sleep(2 ** attempt)
+                    continue
+
+                r.raise_for_status()
+                data = r.json()
+                page_jobs = data.get("jobs_results", []) or []
+                results.extend(page_jobs)
+                break
+            except requests.RequestException:
                 time.sleep(2 ** attempt)
-                continue
 
-            r.raise_for_status()
-            data = r.json()
-            return data.get("jobs_results", []) or []
+        start += num
 
-        except requests.RequestException:
-            time.sleep(2 ** attempt)
-
-    return []
-
-
-def serpapi_google_jobs_listing(job_id: str) -> Dict[str, Any]:
-    if not job_id:
-        return {}
-
-    params = {"engine": "google_jobs_listing", "job_id": job_id, "api_key": SERPAPI_KEY}
-    retry_statuses = {429, 502, 503, 504}
-    max_attempts = 4
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            r = requests.get("https://serpapi.com/search", params=params, timeout=30)
-
-            if r.status_code in retry_statuses:
-                time.sleep(2 ** attempt)
-                continue
-
-            if r.status_code != 200:
-                return {}
-
-            return r.json() or {}
-
-        except requests.RequestException:
-            time.sleep(2 ** attempt)
-
-    return {}
+    return results
 
 
 # ---------------- Helpers ----------------
-def safe_apply_link(job: Dict[str, Any]) -> str:
-    links = job.get("related_links") or []
-    if isinstance(links, list) and links:
-        return links[0].get("link") or "N/A"
-    return "N/A"
-
-
-def safe_source_link(job: Dict[str, Any]) -> str:
-    """
-    Best-effort "source link". Usually same as related_links[0]['link'].
-    If SerpAPI provides more links, we can pick a second one as source.
-    """
-    links = job.get("related_links") or []
-    if isinstance(links, list) and len(links) >= 2:
-        return links[1].get("link") or "N/A"
-    if isinstance(links, list) and len(links) == 1:
-        # fallback to the only link we have
-        return links[0].get("link") or "N/A"
-    return "N/A"
-
-
-def safe_apply_link_from_details(details: Dict[str, Any]) -> str:
-    apply_options = details.get("apply_options") or []
-    if isinstance(apply_options, list) and apply_options:
-        return apply_options[0].get("link") or "N/A"
-    return "N/A"
-
-
-def safe_source_link_from_details(details: Dict[str, Any]) -> str:
-    apply_options = details.get("apply_options") or []
-    if isinstance(apply_options, list) and len(apply_options) >= 2:
-        return apply_options[1].get("link") or "N/A"
-    if isinstance(apply_options, list) and len(apply_options) == 1:
-        return apply_options[0].get("link") or "N/A"
-    return "N/A"
-
-
 def safe_pay(job: Dict[str, Any]) -> str:
     de = job.get("detected_extensions") or {}
     if isinstance(de, dict) and de.get("salary"):
         return str(de["salary"])
 
-    ext = job.get("extensions") or []
-    if isinstance(ext, list):
-        for item in ext:
-            if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower()):
-                return item
-    return "N/A"
-
-
-def safe_pay_from_details(details: Dict[str, Any]) -> str:
-    de = details.get("detected_extensions") or {}
-    if isinstance(de, dict) and de.get("salary"):
-        return str(de["salary"])
+    for item in job.get("extensions", []) or []:
+        if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower()):
+            return item
     return "N/A"
 
 
@@ -174,110 +112,72 @@ def safe_time_posted(job: Dict[str, Any]) -> str:
     if isinstance(de, dict) and de.get("posted_at"):
         return str(de["posted_at"])
 
-    ext = job.get("extensions") or []
-    if isinstance(ext, list):
-        for item in ext:
-            if isinstance(item, str) and (
-                "ago" in item.lower() or "today" in item.lower() or
-                "yesterday" in item.lower() or "posted" in item.lower()
-            ):
-                return item
-    return "N/A"
-
-
-def safe_time_posted_from_details(details: Dict[str, Any]) -> str:
-    de = details.get("detected_extensions") or {}
-    if isinstance(de, dict) and de.get("posted_at"):
-        return str(de["posted_at"])
+    for item in job.get("extensions", []) or []:
+        if isinstance(item, str) and ("ago" in item.lower() or "today" in item.lower() or "yesterday" in item.lower()):
+            return item
     return "N/A"
 
 
 def posted_days(time_posted: str) -> int:
     if not time_posted or time_posted == "N/A":
         return 999
-
-    s = time_posted.strip().lower()
-    if "just posted" in s or "today" in s:
+    s = time_posted.lower()
+    if "today" in s or "just posted" in s:
         return 0
     if "yesterday" in s:
         return 1
-
     m = re.search(r"(\d+)\s+hour", s)
     if m:
         return 0
-
     m = re.search(r"(\d+)\s+day", s)
     if m:
         return int(m.group(1))
-
     m = re.search(r"(\d+)\s+week", s)
     if m:
         return int(m.group(1)) * 7
-
     return 999
 
 
 def looks_food_industry(job: Dict[str, Any]) -> bool:
     text = " ".join([
-        str(job.get("title") or ""),
-        str(job.get("company_name") or ""),
-        str(job.get("description") or ""),
+        str(job.get("title", "")),
+        str(job.get("company_name", "")),
+        str(job.get("description", "")),
     ]).lower()
-    return any(h.lower() in text for h in FOOD_HINTS)
+    return any(h in text for h in FOOD_HINTS)
 
 
-def company_careers_search_link(company_name: str) -> str:
-    """
-    Reliable "company careers link" as a Google search shortcut.
-    Works even when we don't have an official careers URL.
-    """
-    if not company_name or company_name == "N/A":
+def company_careers_link(company: str) -> str:
+    if not company:
         return "N/A"
-    q = f"{company_name} careers"
+    q = f"{company} careers"
     return "https://www.google.com/search?q=" + urllib.parse.quote_plus(q)
 
 
+def indeed_search_link(title: str, location: str) -> str:
+    """
+    Always-works Indeed search link (no N/A).
+    """
+    q = f"{title} {location}"
+    return "https://www.indeed.com/jobs?q=" + urllib.parse.quote_plus(q)
+
+
 def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
-    job_id = job.get("job_id") or "N/A"
-
-    title = job.get("title") or "N/A"
-    company = job.get("company_name") or "N/A"
-    location = job.get("location") or "N/A"
-    source = job.get("via") or "Unknown"
-
-    pay = safe_pay(job)
-    time_posted = safe_time_posted(job)
-    apply_link = safe_apply_link(job)
-    source_link = safe_source_link(job)
-
-    # Try details if any key field is missing (best effort)
-    if job_id != "N/A" and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A" or source_link == "N/A"):
-        details = serpapi_google_jobs_listing(job_id)
-        if details:
-            if pay == "N/A":
-                pay = safe_pay_from_details(details) or pay
-            if time_posted == "N/A":
-                time_posted = safe_time_posted_from_details(details) or time_posted
-            if apply_link == "N/A":
-                apply_link = safe_apply_link_from_details(details) or apply_link
-            if source_link == "N/A":
-                source_link = safe_source_link_from_details(details) or source_link
-            if source == "Unknown":
-                source = details.get("via") or source
-
-    careers_link = company_careers_search_link(company)
+    title = job.get("title", "N/A")
+    company = job.get("company_name", "N/A")
+    location = job.get("location", "N/A")
+    source = job.get("via", "Unknown")
 
     return {
-        "job_id": job_id,  # for dedupe only
+        "job_id": job.get("job_id", "N/A"),
         "title": title,
         "company_name": company,
-        "pay": pay if pay else "N/A",
-        "time_posted": time_posted if time_posted else "N/A",
+        "pay": safe_pay(job),
+        "time_posted": safe_time_posted(job),
         "location": location,
         "source": source,
-        "apply_link": apply_link if apply_link else "N/A",
-        "source_link": source_link if source_link else "N/A",
-        "company_careers_link": careers_link,
+        "company_careers_link": company_careers_link(company),
+        "indeed_search_link": indeed_search_link(title, LOCATION),
     }
 
 
@@ -293,19 +193,19 @@ def build_queries() -> List[str]:
     return queries
 
 
-def dedupe_by_job_id(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def dedupe(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     seen = set()
     out = []
-    for row in rows:
-        key = row.get("job_id") or (row.get("title", "") + "|" + row.get("company_name", "") + "|" + row.get("location", ""))
+    for r in rows:
+        key = r.get("job_id") or (r["title"] + "|" + r["company_name"] + "|" + r["location"])
         if key in seen:
             continue
         seen.add(key)
-        out.append(row)
+        out.append(r)
     return out
 
 
-def create_excel(rows: List[Dict[str, str]], filename: str) -> str:
+def create_excel(rows: List[Dict[str, str]], filename: str):
     wb = Workbook()
     ws = wb.active
     ws.title = "Jobs"
@@ -317,54 +217,49 @@ def create_excel(rows: List[Dict[str, str]], filename: str) -> str:
         "time_posted",
         "location",
         "source",
-        "apply_link",
-        "source_link",
         "company_careers_link",
+        "indeed_search_link",
     ]
     ws.append(headers)
 
-    # Add rows
     for r in rows:
         ws.append([r.get(h, "N/A") for h in headers])
 
-    # Make links clickable in Excel (apply_link, source_link, company_careers_link)
-    link_cols = {
-        "apply_link": headers.index("apply_link") + 1,
-        "source_link": headers.index("source_link") + 1,
-        "company_careers_link": headers.index("company_careers_link") + 1,
-    }
-
-    for row_idx in range(2, ws.max_row + 1):
-        for col_name, col_idx in link_cols.items():
-            cell = ws.cell(row=row_idx, column=col_idx)
+    # clickable links
+    for link_field in ["company_careers_link", "indeed_search_link"]:
+        col = headers.index(link_field) + 1
+        for row_idx in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row_idx, column=col)
             val = str(cell.value or "")
             if val.startswith("http"):
                 cell.hyperlink = val
                 cell.font = Font(color="0000FF", underline="single")
 
     wb.save(filename)
-    return filename
 
 
-def send_email_with_attachment(subject: str, body: str, attachment_path: str):
+def send_email(excel_file: str, count: int):
+    today = datetime.now().strftime("%Y-%m-%d")
+
     msg = EmailMessage()
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_RECEIVER
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    with open(attachment_path, "rb") as f:
-        data = f.read()
-
-    msg.add_attachment(
-        data,
-        maintype="application",
-        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=os.path.basename(attachment_path),
+    msg["Subject"] = f"Daily Food Quality Jobs Report - {today}"
+    msg.set_content(
+        f"Attached is your daily Food Quality/FSQA report (last 7 days).\n"
+        f"Total jobs: {count}\n\n"
+        f"Tip: If source is not Indeed, use the Indeed search link column."
     )
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+    with open(excel_file, "rb") as f:
+        msg.add_attachment(
+            f.read(),
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=excel_file,
+        )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as server:
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)
 
@@ -372,43 +267,27 @@ def send_email_with_attachment(subject: str, body: str, attachment_path: str):
 def main():
     validate_env()
 
-    all_rows: List[Dict[str, str]] = []
-
+    rows: List[Dict[str, str]] = []
     for q in build_queries():
-        jobs = serpapi_google_jobs(q, LOCATION, num=50)
+        # Fetch more results/pages so we get Indeed results too
+        jobs = serpapi_google_jobs(q, LOCATION, num=100, pages=3)
         for job in jobs:
             if looks_food_industry(job):
-                all_rows.append(normalize_row(job))
+                rows.append(normalize_row(job))
 
-    all_rows = dedupe_by_job_id(all_rows)
+    rows = dedupe(rows)
 
-    # keep last 7 days
-    all_rows = [r for r in all_rows if posted_days(r.get("time_posted", "N/A")) <= 7]
+    # last 7 days only
+    rows = [r for r in rows if posted_days(r.get("time_posted", "N/A")) <= 7]
 
     # sort newest first
-    all_rows.sort(key=lambda r: posted_days(r.get("time_posted", "N/A")))
+    rows.sort(key=lambda r: posted_days(r.get("time_posted", "N/A")))
 
     today = datetime.now().strftime("%Y-%m-%d")
     excel_file = f"food_quality_jobs_{today}.xlsx"
-    create_excel(all_rows, excel_file)
 
-    subject = f"Daily Food Quality Jobs Report - {today}"
-    body = f"""Hi,
-
-Attached is your daily Food Industry Quality/FSQA job report (last 7 days).
-Total jobs found: {len(all_rows)}
-
-Excel includes clickable links:
-- apply_link (direct apply when available)
-- source_link (source posting link when available)
-- company_careers_link (Google search to company careers page)
-
-Note: Sometimes apply/source links show N/A when the posting doesn't provide them.
-
-Regards,
-Job Bot
-"""
-    send_email_with_attachment(subject, body, excel_file)
+    create_excel(rows, excel_file)
+    send_email(excel_file, len(rows))
 
 
 if __name__ == "__main__":
