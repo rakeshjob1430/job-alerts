@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import smtplib
 import ssl
@@ -17,7 +18,6 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 LOCATION = "United States"
 
-# Food-industry quality roles (your request)
 ROLE_KEYWORDS = [
     "Quality Assurance Supervisor",
     "Quality Assurance Manager",
@@ -35,14 +35,10 @@ ROLE_KEYWORDS = [
     "Food Safety Supervisor",
 ]
 
-# Food context terms to bias results to food industry
-FOOD_CONTEXT = [
-    "food manufacturing",
-    "food processing",
-    "food industry",
-    "FSQA",
-    "HACCP",
-    "SQF",
+# Keep food focus but less strict than before
+FOOD_HINTS = [
+    "food", "food manufacturing", "food processing", "plant", "production",
+    "HACCP", "SQF", "FSQA", "GMP"
 ]
 
 
@@ -53,13 +49,14 @@ def validate_env():
         raise ValueError("EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECEIVER missing (GitHub Secrets).")
 
 
-def serpapi_google_jobs(query: str, location: str) -> List[Dict[str, Any]]:
-    """Fetch jobs from SerpAPI Google Jobs."""
+def serpapi_google_jobs(query: str, location: str, num: int = 50) -> List[Dict[str, Any]]:
+    """Fetch jobs from SerpAPI Google Jobs. num increases results returned."""
     params = {
         "engine": "google_jobs",
         "q": query,
         "location": location,
         "api_key": SERPAPI_KEY,
+        "num": num,  # IMPORTANT: fetch more jobs
     }
     r = requests.get("https://serpapi.com/search", params=params, timeout=30)
     r.raise_for_status()
@@ -68,105 +65,112 @@ def serpapi_google_jobs(query: str, location: str) -> List[Dict[str, Any]]:
 
 
 def serpapi_google_jobs_listing(job_id: str) -> Dict[str, Any]:
-    """
-    Fetch detailed job listing info.
-    IMPORTANT: SerpAPI sometimes returns 400 for some job_id values.
-    We must NOT fail the whole workflow. Return {} if any error happens.
-    """
+    """Fetch detailed listing info. Return {} if SerpAPI rejects a job_id."""
     if not job_id:
         return {}
-
-    params = {
-        "engine": "google_jobs_listing",
-        "job_id": job_id,
-        "api_key": SERPAPI_KEY,
-    }
-
+    params = {"engine": "google_jobs_listing", "job_id": job_id, "api_key": SERPAPI_KEY}
     try:
         r = requests.get("https://serpapi.com/search", params=params, timeout=30)
-
-        # If SerpAPI returns non-200 (400/403/429/etc), just skip details
         if r.status_code != 200:
             return {}
-
         return r.json() or {}
-
     except requests.RequestException:
         return {}
 
 
-def safe_apply_link_from_job(job: Dict[str, Any]) -> str:
+def safe_apply_link(job: Dict[str, Any]) -> str:
     links = job.get("related_links") or []
-    if isinstance(links, list) and len(links) > 0:
+    if isinstance(links, list) and links:
         return links[0].get("link") or "N/A"
     return "N/A"
 
 
 def safe_apply_link_from_details(details: Dict[str, Any]) -> str:
     apply_options = details.get("apply_options") or []
-    if isinstance(apply_options, list) and len(apply_options) > 0:
+    if isinstance(apply_options, list) and apply_options:
         return apply_options[0].get("link") or "N/A"
-    return "N/A"
-
-
-def safe_pay_from_extensions(ext_list: Any) -> str:
-    if isinstance(ext_list, list):
-        for item in ext_list:
-            if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower() or "per" in item.lower()):
-                return item
     return "N/A"
 
 
 def safe_pay(job: Dict[str, Any]) -> str:
     de = job.get("detected_extensions") or {}
-    if isinstance(de, dict):
-        sal = de.get("salary")
-        if sal:
-            return str(sal)
-    return safe_pay_from_extensions(job.get("extensions") or [])
-
-
-def safe_pay_from_details(details: Dict[str, Any]) -> str:
-    de = details.get("detected_extensions") or {}
-    if isinstance(de, dict):
-        sal = de.get("salary")
-        if sal:
-            return str(sal)
-    return safe_pay_from_extensions(details.get("extensions") or [])
-
-
-def safe_time_posted(job: Dict[str, Any]) -> str:
-    de = job.get("detected_extensions") or {}
-    if isinstance(de, dict):
-        posted = de.get("posted_at")
-        if posted:
-            return str(posted)
+    if isinstance(de, dict) and de.get("salary"):
+        return str(de["salary"])
 
     ext = job.get("extensions") or []
     if isinstance(ext, list):
         for item in ext:
-            if isinstance(item, str) and ("ago" in item.lower() or "posted" in item.lower() or "today" in item.lower() or "yesterday" in item.lower()):
+            if isinstance(item, str) and ("$" in item or "hour" in item.lower() or "year" in item.lower()):
+                return item
+    return "N/A"
+
+
+def safe_pay_from_details(details: Dict[str, Any]) -> str:
+    de = details.get("detected_extensions") or {}
+    if isinstance(de, dict) and de.get("salary"):
+        return str(de["salary"])
+    return "N/A"
+
+
+def safe_time_posted(job: Dict[str, Any]) -> str:
+    de = job.get("detected_extensions") or {}
+    if isinstance(de, dict) and de.get("posted_at"):
+        return str(de["posted_at"])
+
+    ext = job.get("extensions") or []
+    if isinstance(ext, list):
+        for item in ext:
+            if isinstance(item, str) and ("ago" in item.lower() or "today" in item.lower() or "yesterday" in item.lower() or "posted" in item.lower()):
                 return item
     return "N/A"
 
 
 def safe_time_posted_from_details(details: Dict[str, Any]) -> str:
     de = details.get("detected_extensions") or {}
-    if isinstance(de, dict):
-        posted = de.get("posted_at")
-        if posted:
-            return str(posted)
-
-    ext = details.get("extensions") or []
-    if isinstance(ext, list):
-        for item in ext:
-            if isinstance(item, str) and ("ago" in item.lower() or "posted" in item.lower() or "today" in item.lower() or "yesterday" in item.lower()):
-                return item
+    if isinstance(de, dict) and de.get("posted_at"):
+        return str(de["posted_at"])
     return "N/A"
 
 
+# ---- Convert "time_posted" to numeric days for filtering/sorting ----
+def posted_days(time_posted: str) -> int:
+    if not time_posted or time_posted == "N/A":
+        return 999
+
+    s = time_posted.strip().lower()
+    if "just posted" in s or "today" in s:
+        return 0
+    if "yesterday" in s:
+        return 1
+
+    m = re.search(r"(\d+)\s+day", s)
+    if m:
+        return int(m.group(1))
+
+    m = re.search(r"(\d+)\s+hour", s)
+    if m:
+        return 0  # treat hours as today
+
+    m = re.search(r"(\d+)\s+week", s)
+    if m:
+        return int(m.group(1)) * 7
+
+    return 999
+
+
+def looks_food_industry(job: Dict[str, Any]) -> bool:
+    # Soft filter: if any hints appear in title/company/snippet, keep
+    text = " ".join([
+        str(job.get("title") or ""),
+        str(job.get("company_name") or ""),
+        str(job.get("description") or ""),
+    ]).lower()
+
+    return any(h.lower() in text for h in FOOD_HINTS)
+
+
 def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
-    job_id = job.get("job_id")
+    job_id = job.get("job_id") or "N/A"
 
     title = job.get("title") or "N/A"
     company = job.get("company_name") or "N/A"
@@ -175,46 +179,50 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
 
     pay = safe_pay(job)
     time_posted = safe_time_posted(job)
-    apply_link = safe_apply_link_from_job(job)
+    apply_link = safe_apply_link(job)
 
-    # Only try details if missing fields
-    if job_id and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A"):
+    # If missing key fields, try details (best effort)
+    if job_id != "N/A" and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A"):
         details = serpapi_google_jobs_listing(job_id)
-
         if details:
             if pay == "N/A":
-                pay = safe_pay_from_details(details)
-
+                pay = safe_pay_from_details(details) or pay
             if time_posted == "N/A":
-                time_posted = safe_time_posted_from_details(details)
-
+                time_posted = safe_time_posted_from_details(details) or time_posted
             if apply_link == "N/A":
-                apply_link = safe_apply_link_from_details(details)
-
+                apply_link = safe_apply_link_from_details(details) or apply_link
             if source == "Unknown":
                 source = details.get("via") or source
 
     return {
+        "job_id": job_id,  # used for dedupe only (not shown in excel)
         "title": title,
         "company_name": company,
         "pay": pay if pay else "N/A",
         "time_posted": time_posted if time_posted else "N/A",
         "location": location,
         "source": source,
-        "apply_link": apply_link,
+        "apply_link": apply_link if apply_link else "N/A",
     }
 
 
 def build_queries() -> List[str]:
-    food_context = " OR ".join([f'"{x}"' for x in FOOD_CONTEXT])
-    return [f'"{role}" ({food_context})' for role in ROLE_KEYWORDS]
+    # Less strict queries => more jobs
+    queries = []
+    for role in ROLE_KEYWORDS:
+        queries.append(f'"{role}" food manufacturing')
+        queries.append(f'"{role}" food processing')
+        queries.append(f'"{role}" FSQA')
+        queries.append(f'"{role}" HACCP')
+        queries.append(f'"{role}" SQF')
+    return queries
 
 
-def dedupe_by_link(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def dedupe_by_job_id(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     seen = set()
     out = []
     for row in rows:
-        key = row.get("apply_link") or (row.get("title", "") + row.get("company_name", ""))
+        key = row.get("job_id") or (row.get("title", "") + "|" + row.get("company_name", "") + "|" + row.get("location", ""))
         if key in seen:
             continue
         seen.add(key)
@@ -263,15 +271,23 @@ def send_email_with_attachment(subject: str, body: str, attachment_path: str):
 def main():
     validate_env()
 
-    queries = build_queries()
     all_rows: List[Dict[str, str]] = []
 
-    for q in queries:
-        jobs = serpapi_google_jobs(q, LOCATION)
+    for q in build_queries():
+        jobs = serpapi_google_jobs(q, LOCATION, num=50)
         for job in jobs:
-            all_rows.append(normalize_row(job))
+            # soft filter to keep food industry relevance
+            if looks_food_industry(job):
+                all_rows.append(normalize_row(job))
 
-    all_rows = dedupe_by_link(all_rows)
+    # dedupe correctly (won’t collapse to 1)
+    all_rows = dedupe_by_job_id(all_rows)
+
+    # filter last 7 days
+    all_rows = [r for r in all_rows if posted_days(r.get("time_posted", "N/A")) <= 7]
+
+    # sort newest first
+    all_rows.sort(key=lambda r: posted_days(r.get("time_posted", "N/A")))
 
     today = datetime.now().strftime("%Y-%m-%d")
     excel_file = f"food_quality_jobs_{today}.xlsx"
@@ -280,14 +296,14 @@ def main():
     subject = f"Daily Food Quality Jobs Report - {today}"
     body = f"""Hi,
 
-Attached is your daily Food Industry Quality job report.
+Attached is your daily Food Industry Quality job report (last 7 days).
 Total jobs found: {len(all_rows)}
 
 Columns:
 title, company name, pay, time posted, location, source, link to apply
 
 Note:
-Some jobs may still show N/A for pay/time/link if the posting does not publish that info.
+Pay/time/link may be N/A if the employer posting doesn't publish it.
 
 Regards,
 Job Bot
