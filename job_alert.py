@@ -1,53 +1,66 @@
+import os
+import json
 import requests
 import smtplib
 import ssl
-import json
 from email.message import EmailMessage
 from datetime import datetime
 
 # ================= CONFIG =================
-import os
-
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")   # Gmail App Password
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
 SEARCH_QUERY = "Food Safety Supervisor"
 LOCATION = "United States"
 
 SEEN_JOBS_FILE = "seen_jobs.json"
-
 # =========================================
+
 
 def load_seen_jobs():
     try:
         with open(SEEN_JOBS_FILE, "r") as f:
-            return set(json.load(f))
+            data = json.load(f)
+            return set(data) if isinstance(data, list) else set()
     except:
         return set()
 
+
 def save_seen_jobs(jobs):
     with open(SEEN_JOBS_FILE, "w") as f:
-        json.dump(list(jobs), f)
+        json.dump(sorted(list(jobs)), f)
+
 
 def send_email(job):
+    title = job.get("title", "New Job")
+    company = job.get("company_name", "N/A")
+    location = job.get("location", "N/A")
+    source = job.get("via", "Unknown")
+
+    apply_link = "N/A"
+    if job.get("related_links") and len(job["related_links"]) > 0:
+        apply_link = job["related_links"][0].get("link", "N/A")
+
     msg = EmailMessage()
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_RECEIVER
-    msg["Subject"] = f"🚨 NEW JOB: {job['title']}"
+    msg["Subject"] = f"🚨 NEW JOB: {title}"
 
     body = f"""
-New Job Posted!
+🚨 New Job Posted!
 
-Title: {job['title']}
-Company: {job['company_name']}
-Location: {job['location']}
-Source: {job['via']}
-Apply Link: {job['related_links'][0]['link']}
+Title: {title}
+Company: {company}
+Location: {location}
+Source: {source}
 
-Posted at: {datetime.now()}
+Apply Link:
+{apply_link}
+
+Checked at: {datetime.now()}
 """
     msg.set_content(body)
 
@@ -56,7 +69,14 @@ Posted at: {datetime.now()}
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)
 
+
 def check_jobs():
+    # quick validation so you know immediately if secrets are missing
+    if not SERPAPI_KEY:
+        raise ValueError("Missing SERPAPI_KEY (GitHub Secret).")
+    if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
+        raise ValueError("Missing EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECEIVER (GitHub Secrets).")
+
     seen_jobs = load_seen_jobs()
 
     params = {
@@ -66,11 +86,14 @@ def check_jobs():
         "api_key": SERPAPI_KEY
     }
 
-    response = requests.get("https://serpapi.com/search", params=params)
+    response = requests.get("https://serpapi.com/search", params=params, timeout=30)
+    response.raise_for_status()
     results = response.json()
 
     for job in results.get("jobs_results", []):
         job_id = job.get("job_id")
+        if not job_id:
+            continue
 
         if job_id not in seen_jobs:
             send_email(job)
@@ -78,7 +101,6 @@ def check_jobs():
 
     save_seen_jobs(seen_jobs)
 
+
 if __name__ == "__main__":
     check_jobs()
-
-
