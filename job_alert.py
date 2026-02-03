@@ -6,16 +6,19 @@ from email.message import EmailMessage
 from datetime import datetime
 
 # ================= CONFIG =================
-SERPAPI_KEY = "978e05adbef88e8b658bef3f59c4fdb6a06f6f0c27ad6551c5a73e87e5a8b0d6YOUR_SERPAPI_KEY"
+import os
 
-EMAIL_SENDER = "rakeshchigurupati1623@gmail.com"
-EMAIL_PASSWORD = "wozu kzpb ohyd hbcq"
-EMAIL_RECEIVER = "rakeshchigurupati1623@gmail.com"
+SERPAPI_KEY = os.getenv("978e05adbef88e8b658bef3f59c4fdb6a06f6f0c27ad6551c5a73e87e5a8b0d6")
+
+EMAIL_SENDER = os.getenv("rakeshchigurupati1623@gmail.com")
+EMAIL_PASSWORD = os.getenv("wozu kzpb ohyd hbcq")
+EMAIL_RECEIVER = os.getenv("rakeshchigurupati1623@gmail.com")
 
 SEARCH_QUERY = "Food Safety Supervisor"
 LOCATION = "United States"
 
 SEEN_JOBS_FILE = "seen_jobs.json"
+
 # =========================================
 
 def load_seen_jobs():
@@ -77,3 +80,4 @@ def check_jobs():
 
 if __name__ == "__main__":
     check_jobs()
+
