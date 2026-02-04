@@ -16,7 +16,10 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # Gmail App Password
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+
+# Put 2 emails in GitHub secret EMAIL_RECEIVER like:
+# first@gmail.com, second@gmail.com
+EMAIL_RECEIVERS = [e.strip() for e in (os.getenv("EMAIL_RECEIVER") or "").split(",") if e.strip()]
 # ================================================
 
 LOCATION = "United States"
@@ -49,7 +52,7 @@ FOOD_HINTS = [
 def validate_env():
     if not SERPAPI_KEY:
         raise ValueError("SERPAPI_KEY missing (GitHub Secret).")
-    if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
+    if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVERS:
         raise ValueError("EMAIL_SENDER / EMAIL_PASSWORD / EMAIL_RECEIVER missing (GitHub Secrets).")
 
 
@@ -75,8 +78,7 @@ def serpapi_google_jobs(query: str, location: str, num: int = 50) -> List[Dict[s
                 continue
 
             r.raise_for_status()
-            data = r.json()
-            return data.get("jobs_results", []) or []
+            return r.json().get("jobs_results", []) or []
 
         except requests.RequestException:
             time.sleep(2 ** attempt)
@@ -120,15 +122,10 @@ def safe_apply_link(job: Dict[str, Any]) -> str:
 
 
 def safe_source_link(job: Dict[str, Any]) -> str:
-    """
-    Best-effort "source link". Usually same as related_links[0]['link'].
-    If SerpAPI provides more links, we can pick a second one as source.
-    """
     links = job.get("related_links") or []
     if isinstance(links, list) and len(links) >= 2:
         return links[1].get("link") or "N/A"
     if isinstance(links, list) and len(links) == 1:
-        # fallback to the only link we have
         return links[0].get("link") or "N/A"
     return "N/A"
 
@@ -202,8 +199,7 @@ def posted_days(time_posted: str) -> int:
     if "yesterday" in s:
         return 1
 
-    m = re.search(r"(\d+)\s+hour", s)
-    if m:
+    if re.search(r"\d+\s+hour", s):
         return 0
 
     m = re.search(r"(\d+)\s+day", s)
@@ -227,10 +223,6 @@ def looks_food_industry(job: Dict[str, Any]) -> bool:
 
 
 def company_careers_search_link(company_name: str) -> str:
-    """
-    Reliable "company careers link" as a Google search shortcut.
-    Works even when we don't have an official careers URL.
-    """
     if not company_name or company_name == "N/A":
         return "N/A"
     q = f"{company_name} careers"
@@ -250,7 +242,6 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
     apply_link = safe_apply_link(job)
     source_link = safe_source_link(job)
 
-    # Try details if any key field is missing (best effort)
     if job_id != "N/A" and (pay == "N/A" or time_posted == "N/A" or apply_link == "N/A" or source_link == "N/A"):
         details = serpapi_google_jobs_listing(job_id)
         if details:
@@ -265,10 +256,8 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
             if source == "Unknown":
                 source = details.get("via") or source
 
-    careers_link = company_careers_search_link(company)
-
     return {
-        "job_id": job_id,  # for dedupe only
+        "job_id": job_id,
         "title": title,
         "company_name": company,
         "pay": pay if pay else "N/A",
@@ -277,7 +266,7 @@ def normalize_row(job: Dict[str, Any]) -> Dict[str, str]:
         "source": source,
         "apply_link": apply_link if apply_link else "N/A",
         "source_link": source_link if source_link else "N/A",
-        "company_careers_link": careers_link,
+        "company_careers_link": company_careers_search_link(company),
     }
 
 
@@ -323,11 +312,9 @@ def create_excel(rows: List[Dict[str, str]], filename: str) -> str:
     ]
     ws.append(headers)
 
-    # Add rows
     for r in rows:
         ws.append([r.get(h, "N/A") for h in headers])
 
-    # Make links clickable in Excel (apply_link, source_link, company_careers_link)
     link_cols = {
         "apply_link": headers.index("apply_link") + 1,
         "source_link": headers.index("source_link") + 1,
@@ -335,7 +322,7 @@ def create_excel(rows: List[Dict[str, str]], filename: str) -> str:
     }
 
     for row_idx in range(2, ws.max_row + 1):
-        for col_name, col_idx in link_cols.items():
+        for _, col_idx in link_cols.items():
             cell = ws.cell(row=row_idx, column=col_idx)
             val = str(cell.value or "")
             if val.startswith("http"):
@@ -349,7 +336,7 @@ def create_excel(rows: List[Dict[str, str]], filename: str) -> str:
 def send_email_with_attachment(subject: str, body: str, attachment_path: str):
     msg = EmailMessage()
     msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_RECEIVER
+    msg["To"] = ", ".join(EMAIL_RECEIVERS)   # ✅ sends to 2 emails
     msg["Subject"] = subject
     msg.set_content(body)
 
@@ -381,11 +368,7 @@ def main():
                 all_rows.append(normalize_row(job))
 
     all_rows = dedupe_by_job_id(all_rows)
-
-    # keep last 7 days
     all_rows = [r for r in all_rows if posted_days(r.get("time_posted", "N/A")) <= 7]
-
-    # sort newest first
     all_rows.sort(key=lambda r: posted_days(r.get("time_posted", "N/A")))
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -398,12 +381,7 @@ def main():
 Attached is your daily Food Industry Quality/FSQA job report (last 7 days).
 Total jobs found: {len(all_rows)}
 
-Excel includes clickable links:
-- apply_link (direct apply when available)
-- source_link (source posting link when available)
-- company_careers_link (Google search to company careers page)
-
-Note: Sometimes apply/source links show N/A when the posting doesn't provide them.
+Receivers: {", ".join(EMAIL_RECEIVERS)}
 
 Regards,
 Job Bot
